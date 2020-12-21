@@ -1,0 +1,558 @@
+---
+title: "R Notebook"
+author: "DIAMBAN Mamadou Lamine"
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(broom)
+library(tidytext)
+library(forecast)
+library(wordcloud2)
+library(kableExtra)
+library(ggrepel)
+library(scales)
+library(plotly)
+library(ggpubr)
+library(leaflet)
+library(funModeling)
+```
+
+```{r echo=FALSE}
+mycolors <- c("#FF5A60", "#1E5B5B", "#990000", "#FAAB18", "#D55E00", "#CC79A7", "#999999",
+              "#C2D6ED", "#1380A1", "#56B4E9", "#009E73", "#1E5B5B",
+              "#F0E442", "#0072B2", "#CC79A7", "#E69F00",
+              "#E570F0","#1EB1F3","#1DBE7F", "#C70039", "#B93B20",
+              "#009E73","#0072B2","#CC79A7","#999999","#E69F00")
+bar_col_1 <- mycolors[1]
+bar_col_2 <- mycolors[1:2]
+bar_col_3 <- mycolors[1:3]
+
+theme_set(theme_minimal() +
+          theme(text = element_text(family="Palatino")))
+
+my_kable <- function(table){
+    kable(table) %>%
+        kable_styling(font_size = 11,
+                      latex_options = c("striped", "hold_position","condensed", "bordered"))
+}
+
+mycol <- c("#1E5B5B","#990000", "#B93B20")
+options(OutDec=",")
+#scales::show_col(mycolors)
+
+mycolors <- c("#D55E00","#0072B2")
+```
+
+Cette fois on s'intéresse aux données d'Airbnb de Boston qui sont issues du site `kaggle`. Le but est de pratiquer la `Data visualisation` avec `ggplot2` tout en faisant des analyses exploratoires, prédictives, textuelles et chronologique.  
+Et au vue de mon temps libre très restreint (oui un M2 + travail en temps partiel + ... c'est beaucoup d'investissements) les sorties code seront très peu commenté. Il n'empêche que même un non-statisticien serait capable de les interpréter.  
+Ceci dit, nous allons travailler avec trois sources de données:  
+-- `listings`: les 3/4 de cette étude se basera sur ces données où l'on a `385 observations` et `95 variables`. Ces dernières décrivent globalement les annonces mises sur le site d'Airbnb pour la ville de boston. On y trouve entre autres les descriptions habituelles: 
+le nom de l'hôte, l'emplacement, le bien proposé, la note attribuée à l'hôte par les voyageurs, le prix.  
+-- `reviews`: contient les critiques émises par les voyageurs entre Mars 2009 et Février 2018.  
+--`calendar`: contient les dates de disponibilités et les prix des annonces entre Septembre 2016 et Septembre 2017. 
+
+# Données listings
+```{r}
+bnb <- read.csv("../../Donnees/AirbnbBonston/listings.csv", header = TRUE, sep = ",", na.strings = "") 
+
+
+DT::datatable(df_status(bnb, print_results = FALSE))
+```
+
+## Nettoyage
+Etant donné que toutes les variables ne nous seront pas utiles pour cette analyse, on en sélectionne que quelques une qui nous paraissent pertinentes.  
+
+```{r}
+airbnb <- bnb %>% 
+  select(neighbourhood_cleansed,latitude,longitude,property_type,
+         room_type,accommodates:beds,price,extra_people,
+         number_of_reviews, review_scores_rating,reviews_per_month) %>% 
+  glimpse()
+```
+
+On peut voir aussi que les variables `price` et `extra_peaople` sont considérés comme des variables qualitatives dûes au caractère $ présent sur chaque prix. On va donc enlever le caractère puis le convertir comme variable quantitative.  
+Les variables `review_scores_rating` et `reviews_per_month` ont des valeurs manquantes qu'on remplacera par 0.
+
+```{r}
+airbnb$price <- str_sub(bnb$price, 2) %>% 
+  str_replace_all(",", "") %>% 
+  as.numeric()
+airbnb <- airbnb[-c(which(airbnb$price==0)),]
+airbnb$extra_people <- as.numeric(str_sub(airbnb$extra_people, 2))
+airbnb$review_scores_rating[is.na(airbnb$review_scores_rating)] <- 0
+airbnb$reviews_per_month[is.na(airbnb$reviews_per_month)] <- 0
+```
+
+
+```{r}
+table_contin <- data.frame(table(airbnb$property_type))
+colnames(table_contin) <- c("Modalité", "Effectif")
+my_kable(table_contin)
+```
+
+```{r}
+airbnb$property_type <- fct_recode(airbnb$property_type,
+                                   "Other" = "Aparthotel", "Other" = "Barn",
+                                   "Other" = "Bed and breakfast", "Other" = "Boat",
+                                   "Other" = "Boutique hotel", "Other" = "Bungalow",
+                                   "Other" = "Camper/RV", "Other" = "Chalet",
+                                   "Other" = "Guest suite", "Other" = "Guesthouse",
+                                   "Other" = "Hotel","Other" = "Loft",
+                                   "Other" = "Resort", "Other" = "Tiny house", "Other" = "Villa")
+```
+
+On réalise une boîte à moustache pour avoir un apperçu sur la variable `price` afin de détecter les potentiels valeurs aberrants.
+
+```{r}
+outl_price <- boxplot(airbnb$price,plot = FALSE)$out
+```
+
+```{r}
+airbnb %>% 
+  ggplot(aes(x = "", y = price, fill = bar_col_1)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_continuous(labels = dollar_format()) +
+  labs(title = "Boxplot du prix", x = " ")
+  
+```
+
+On remarque que les prix varient entre 0 et 5000$ avec des valeurs qui sont au-delà de l'extrémité supérieure.  
+Ce qui nous conduit à enlever toutes les observations qui sont supérieurs à `r min(outl_price)`.
+
+```{r}
+airbnb<- airbnb[!airbnb$price %in% outl_price, ]
+```
+
+
+## Analyse exploratoire
+```{r}
+price_mean <- round(mean(airbnb$price),2)
+airbnb %>% 
+  ggplot(aes(price)) + 
+  geom_histogram(color = "white", fill = bar_col_1) +
+  geom_vline(xintercept = price_mean, linetype = "dashed") +
+  annotate(geom = "curve", x = 200, y = 480, xend = 153, yend = 400, 
+           curvature = .3, arrow = arrow(length = unit(2, "mm"))) +
+  annotate("text", x = 270, y = 480, size = 3.5,
+           label = paste("Prix moyen à Boston:", dollar(price_mean) )) +
+  scale_x_continuous(labels = dollar_format()) +
+  labs(title = "Prix", y = "")
+```
+
+
+
+```{r}
+airbnb %>% 
+  count(neighbourhood_cleansed) %>% 
+  mutate(neig = fct_reorder(neighbourhood_cleansed, n)) %>% 
+  ggplot(aes(neig, n)) +
+  geom_col(fill = bar_col_1) +
+  geom_text(aes(label = n), hjust = -.2, size = 3) +
+  coord_flip() +
+  labs(title = "Quartiers proposant des logement", x = "", y = "") +
+  theme(axis.text.x = element_blank())
+```
+
+
+
+```{r}
+airbnb %>% 
+  filter(!is.na(property_type)) %>% 
+  count(room_type, property_type) %>% 
+  mutate(property_type = fct_reorder(property_type, n)) %>% 
+  ggplot(aes(property_type, n, fill = room_type)) +
+  geom_col(position = position_fill()) +
+  geom_text(aes(label = n),
+            position = position_fill(vjust = .5), 
+            size = 2.9, color = "white") +
+  labs(title = "Type de logement", x = "", y = "") +
+  theme(axis.text.x  = element_blank(),
+        axis.ticks.y.left = element_blank(),
+        legend.position = "bottom") +
+  scale_fill_manual(values = mycol) +
+  coord_flip()
+```
+
+
+```{r}
+p <- airbnb %>% 
+  ggplot(aes(reorder(neighbourhood_cleansed, price, FUN = mean), price, 
+             fill = neighbourhood_cleansed)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = dollar_format())+
+  theme(legend.position = "none") +
+  labs(title = "Prix dans chaque quartier", x = "") +
+  coord_flip()
+
+ggplotly(p)
+```
+
+
+```{r}
+airbnb %>% 
+  filter(!is.na(bedrooms)) %>% 
+  ggplot(aes(neighbourhood_cleansed, price, color = room_type)) +
+  geom_boxplot() +
+  facet_wrap(~room_type, scales = "free_x") +
+  scale_color_manual(values = bar_col_3) +
+  scale_y_continuous(labels = dollar_format()) +
+  theme(legend.position = "bottom") +
+  labs(title = "Prix dans chaque quartier",
+       subtitle = "Selon le type de logement", y = "Prix") +
+  coord_flip()
+```
+
+```{r}
+p <- airbnb %>% 
+  filter(extra_people<=50) %>% 
+  ggplot(aes(reorder(neighbourhood_cleansed, extra_people, FUN = mean), extra_people, 
+             fill = neighbourhood_cleansed)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = dollar_format()) +
+  theme(legend.position = "none") +
+  labs(title = "Les extras selon le quartier", x = "") +
+  coord_flip()
+
+ggplotly(p)
+```
+
+```{r}
+p1 <- airbnb %>% 
+  ggplot(aes(room_type, price, fill = room_type)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, geom="point", size=3, shape=18) +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_fill_manual(values = bar_col_3) +
+  theme(legend.position = "none") +
+  labs(subtitle = "Prix selon le type d'appartement", x = "")
+
+p2 <- airbnb %>% 
+  filter(extra_people<=50) %>% 
+  ggplot(aes(room_type, extra_people, fill = room_type)) +
+  geom_boxplot() +
+  
+  stat_summary(fun.y=mean, geom="point", size=3, shape=18) +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_fill_manual(values = bar_col_3) +
+  theme(legend.position = "none") +
+  labs(subtitle = "Prix selon le type d'appartement", x = "")
+
+ggarrange(p1, p2)
+```
+
+```{r}
+airbnb %>% 
+  group_by(room_type, property_type) %>% 
+  select(room_type, property_type, price) %>% 
+  summarise(mean_price = round(mean(price, na.rm = TRUE), 0)) %>% 
+  ggplot(aes(property_type, mean_price, color = room_type)) +
+  geom_segment(aes(x=property_type, xend=property_type, y=0, yend=mean_price), 
+               size = 1, alpha = .7) +
+  geom_point( size = 3, alpha = .7)  +
+  geom_text(aes(label = mean_price, x = property_type, y = mean_price),
+            size = 3, vjust = 2) +
+  facet_wrap(~room_type, scales = "free_x") +
+  theme(legend.position = "none",
+        axis.text.x = element_blank()) +
+  scale_color_manual(values = bar_col_3) +
+  coord_flip() +
+  labs(title = "Moyenne des prix de location",
+       subtitle = "Selon le type de logement et le type de propriété",
+       x = "Type de proprieté", y = "Prix moyen")
+```
+
+
+
+```{r}
+#Rmisc::group.CI(price ~bedrooms+room_type,data = airbnb, ci = .95)
+airbnb %>% 
+  filter(!is.na(bedrooms)) %>% 
+  Rmisc::summarySE(measurevar="price", groupvars=c("bedrooms","room_type")) %>% 
+  ggplot(aes(bedrooms, price, color = room_type)) +
+  geom_point(aes(color = room_type), shape = 17, size = 3) +
+  geom_line(size = 2) +
+  geom_label_repel(aes(label = round(price,2)), size = 3) +
+  geom_errorbar(aes(ymin = price - ci, ymax = price + ci), width = .08, size = .8) +
+  theme(legend.position = "bottom") +
+  scale_x_discrete(limits=c(0:6)) +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_color_manual(values = bar_col_3) +
+  labs(title = "Prix moyen", 
+       subtitle = "Selon le type de logement et le nombre de chambre", 
+       y = "Prix moyen")
+```
+
+
+
+
+```{r}
+airbnb %>% 
+  #filter(review_scores_rating > 75) %>% 
+  ggplot(aes(review_scores_rating, price)) +
+  geom_density_2d() +
+  #stat_density_2d(aes(fill = ..level..), geom = "polygon") +
+  scale_y_continuous(labels = dollar_format()) +
+  theme(legend.position = "bottom") +
+  labs(title = "Prix d'un logement", 
+       subtitle = "Selon la note de l'hôte")
+```
+
+
+## Cartographie
+```{r}
+quartiers <- airbnb %>% 
+  group_by(neighbourhood_cleansed) %>% 
+  summarise(longitude = mean(longitude), latitude = mean(latitude)) %>% 
+  distinct(neighbourhood_cleansed, longitude, latitude)
+
+airbnb %>% 
+  ggplot(aes(latitude, longitude,color = neighbourhood_cleansed)) +
+  geom_point() +
+  geom_label_repel(data = quartiers, aes(label = neighbourhood_cleansed), 
+                   size = 2, color = mycolors[2]) +
+  theme_void() +
+  theme(legend.position = "none",
+        axis.text = element_blank()) +
+  scale_color_viridis_d() +
+  labs(title = "Cartographie des différents quartiers")
+```
+
+
+
+```{r}
+leaflet(airbnb) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  setView(lng = -71.07776, 
+          lat = 42.34321,
+          zoom = 11.5)  %>%
+  addMarkers(clusterOptions = markerClusterOptions())
+```
+
+
+## Analyse Textuel
+
+```{r}
+reviews <- read_csv("../../Donnees/AirbnbBonston/reviews.csv") 
+
+my_kable(head(reviews))
+```
+
+```{r}
+mots_indesirables <- c(str_to_lower(levels(airbnb$neighbourhood_cleansed)),
+                       str_to_lower(levels(airbnb$room_type)),
+                       str_to_lower(levels(airbnb$property_type)),
+                       str_to_lower(levels(bnb$city)), "location", "host")
+
+freq_mots <- reviews %>% 
+  unnest_tokens(word, comments) %>%
+  anti_join(stop_words) %>%
+  distinct() %>%
+  filter(!word %in% mots_indesirables) %>% 
+  filter(nchar(word) > 3) %>% 
+  count(word, sort = TRUE) 
+
+
+freq_mots %>% 
+  top_n(25, n) %>% 
+  ggplot(aes(reorder(word, n),n)) +
+  geom_col(fill = bar_col_1) +
+  labs(x = " ") +
+  coord_flip()
+```
+
+```{r}
+set.seed(1010)
+wordcloud2(freq_mots[1:100, ])
+```
+
+
+
+```{r}
+reviews_sentiment <- reviews %>%
+  unnest_tokens(word, comments) %>% 
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) 
+
+reviews_sentiment %>%
+  group_by(sentiment) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>% 
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) + 
+  facet_wrap(~sentiment, scales = "free") + 
+  labs(y = "t", x = " ") + 
+  coord_flip()
+```
+
+
+```{r}
+reviews_sentiment %>%
+  reshape2::acast(word ~ sentiment, value.var = "n", fill = 0) %>% 
+  wordcloud::comparison.cloud(max.words = 100, 
+                              colors = bar_col_2)
+```
+
+
+```{r}
+review_annee <- reviews %>% 
+  unnest_tokens(word, comments) %>%
+  anti_join(stop_words) %>%
+  distinct() %>%
+  filter(!word %in% mots_indesirables & nchar(word) > 3) %>% 
+  mutate(annee = factor(format(date, format = "%Y"))) %>% 
+  group_by(annee) %>% 
+  count(word, annee, sort = TRUE) %>%
+  slice(1:10) %>% 
+  ungroup() %>%
+  mutate(row = -row_number()) 
+
+review_annee %>% 
+  ggplot(aes(row, n, fill = annee)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~annee, scales = "free") +
+  theme_pubclean() +
+  theme(text = element_text(size = 8)) +
+  scale_x_continuous(breaks = review_annee$row, labels = review_annee$word) +
+  labs(subtitle = " ", x = " ", y = " ") +
+  coord_flip()
+```
+
+
+```{r echo=FALSE, eval=FALSE}
+library(gganimate)
+library(gifski)
+review_annee %>% 
+  ggplot(aes(row, n, fill = annee)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~word, scales = "free") +
+  theme_pubclean() +
+  theme(text = element_text(size = 8)) +
+  scale_x_continuous(breaks = review_annee$row, labels = review_annee$word) +
+  labs(subtitle = " ", x = " ", y = " ") +
+  transition_states(annee, transition_length = 11, state_length = 1) +
+  ease_aes('sine-in-out')+
+  coord_flip()
+```
+
+
+# Analyse temporelle
+```{r}
+calendar <- read.csv("../../Donnees/AirbnbBonston/calendar2.csv", header = TRUE, sep = ",") 
+
+my_kable(head(calendar))
+```
+
+```{r}
+calendar$date <- as.Date(calendar$date, format = "%Y-%m-%d")
+calendar$mois <- format(calendar$date, format = "%b")
+calendar$jours <- weekdays(calendar$date)
+calendar$price <- str_sub(calendar$price, 2) %>% 
+  str_replace_all(",", "") %>% 
+  as.numeric()
+
+my_kable(df_status(calendar, print_results = FALSE))
+```
+
+
+
+
+
+```{r}
+price_mean <- calendar %>% 
+  group_by(date) %>% 
+  summarise(price = mean(price, na.rm = TRUE))
+
+qplot(date, price, data = price_mean, geom = "line") +
+  scale_y_continuous(labels = dollar_format()) +
+  labs(title = "Prix moyen journalier", x = "", y = "Prix moyen")
+```
+
+```{r echo=FALSE, eval=FALSE}
+library(highcharter)
+library(quantmod)
+highchart(type = "stock") %>% 
+hc_add_series(price_mean$price, type = "line", color = bar_col_1)
+```
+
+```{r}
+calendar_ts <- calendar %>% 
+  filter(date>"2017-05-31") %>% 
+  select(date, price) %>% 
+  group_by(date) %>% 
+  summarise(price = mean(price, na.rm = TRUE)) %>% 
+  arrange(date) %>% 
+  ts(start = c(2017,6))
+```
+
+
+```{r}
+calendar %>% 
+  filter(price <= 511) %>% 
+  ggplot(aes(reorder(mois, price), price, fill = mois)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = dollar_format()) +
+  theme(legend.position = "none") +
+  labs(x = "mois", y = "Prix")
+```
+
+```{r}
+calendar %>% 
+  filter(price <= 511) %>% 
+  ggplot(aes(reorder(jours, price), price, fill = jours)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(legend.position = "none") +
+  labs(x = "jours", y = "Prix", x = "")
+```
+
+
+
+
+
+
+```{r eval=FALSE, echo=FALSE}
+ addCircles(lng = ~longitude, 
+             lat = ~latitude, 
+             weight = 2, 
+             popup = ~neighbourhood_cleansed,
+             color = bar_col_1, 
+             fillOpacity = 0.5) 
+```
+
+
+
+```{r eval=FALSE, echo=FALSE}
+set.seed(1010)
+airbnb_2 <- airbnb[,-c(1:4, 6:7, 10:12)]
+
+n <- sample(nrow(airbnb_2), 4000)
+train <- airbnb_2[n,]
+test <- airbnb_2[-n,]
+
+library(randomForest)
+library(caret)
+library(doParallel)
+
+set.seed(1010)
+c1 <- makePSOCKcluster(4)
+registerDoParallel(c1)
+grill_mtry <- data.frame(mtry=seq(1,14, by=3))
+ctrl <- trainControl(method = "oob")
+sel.mtry <- train(price~., data = train, method = "rf", na.action = na.roughfix)
+stopCluster(c1)
+sel.mtry
+
+
+foret <- randomForest(price~.,mtry = 13, data = train, na.action = na.omit)
+foret
+```
+
